@@ -17,14 +17,27 @@ func main() {
 	}
 
 	defer l.Close()
+	fmt.Println("Server is listening on port 6379")
+	
+	conn, err := l.Accept()
 
 	for {
-		conn, err := l.Accept()
 		if err != nil {
 			fmt.Println("Error accepting connection: ", err.Error())
 			os.Exit(1)
 		}
-		conn.Write([]byte("+PONG\r\n"))
+		handleRequest(conn)
 	}
+}
 
+func handleRequest(conn net.Conn) {
+
+	buf := make([]byte, 1024)
+	n, err := conn.Read(buf)
+	if err != nil {
+		fmt.Println("Error in reading input: ", err.Error())
+	}
+	fmt.Println("Received data", buf[:n])
+
+	conn.Write([]byte("+PONG\r\n"))
 }
