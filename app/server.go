@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"net"
 	"os"
-	"strconv"
+	// "strconv"
 	"strings"
 )
 
@@ -35,13 +35,14 @@ func main() {
 func handleRequest(conn net.Conn) (err error) {
 	defer conn.Close()
 
-	buf := make([]byte, 1024)
 
 	for {
+		buf := make([]byte, 1024)
 		length, err := conn.Read(buf)
 
 		if err != nil {
 			fmt.Println("Error in reading input: ", err.Error())
+			return err
 		}
 		fmt.Println("Received data", buf[:length])
 
@@ -49,36 +50,53 @@ func handleRequest(conn net.Conn) (err error) {
 		lines := strings.Split(rawInput, "\r\n")
 		fmt.Println(lines)
 
+		cmd := lines[2]
+		var values []RespToken
+
+		for i := 4; i < len(lines)-1; i+=2 {
+			// Add all arguments of the redis command
+			values = append(values, RespToken { kind: "string", bulk: lines[i] })
+		}
+
+		if handler, ok := CommandMap[cmd]; ok {
+			res := handler(values)
+			switch res.kind {
+			case "string":
+				conn.Write([]byte(res.value))
+			}
+		}
+
+
 		// If the input received is an array
-		if len(lines) > 0 && strings.HasPrefix(lines[0], "*") {
+		// if len(lines) > 0 && strings.HasPrefix(lines[0], "*") {
 
-			elements := []string{}
-			for i := 1; i < len(lines); i++ {
-				if strings.HasPrefix(lines[i], "$") {
-					elementLength, err := strconv.Atoi(strings.Trim(lines[i][1:], "\r"))
+		// 	elements := []string{}
+		// 	for i := 1; i < len(lines); i++ {
+		// 		if strings.HasPrefix(lines[i], "$") {
+		// 			elementLength, err := strconv.Atoi(strings.Trim(lines[i][1:], "\r"))
 
-					if err != nil {
-						fmt.Println("Error parsing element length:", err.Error())
-					}
+		// 			if err != nil {
+		// 				fmt.Println("Error parsing element length:", err.Error())
+		// 			}
 
-					if i+1 < len(lines) && len(strings.Trim(lines[i+1], "\r")) == elementLength {
-						elements = append(elements, strings.Trim(lines[i+1], "\r"))
-						i++ // Skip the next line as it is part of the current element
-					}
-				}
+		// 			if i+1 < len(lines) && len(strings.Trim(lines[i+1], "\r")) == elementLength {
+		// 				elements = append(elements, strings.Trim(lines[i+1], "\r"))
+		// 				i++ // Skip the next line as it is part of the current element
+		// 			}
+		// 		}
 
-			}
+		// 	}
 
-			if len(elements) == 1 && elements[0] == "PING" {
-				conn.Write([]byte("+PONG\r\n"))
-			}
+		// 	if len(elements) == 1 && elements[0] == "PING" {
+		// 		conn.Write([]byte("+PONG\r\n"))
+		// 	}
 
-			if len(elements) == 2 && strings.ToLower(elements[0]) == "echo" {
-				response := fmt.Sprintf("$%d\r\n%s\r\n", len(elements[1]), elements[1])
-				conn.Write([]byte(response))
-			}
+		// 	if len(elements) == 2 && strings.ToLower(elements[0]) == "echo" {
+		// 		response := fmt.Sprintf("$%d\r\n%s\r\n", len(elements[1]), elements[1])
+		// 		conn.Write([]byte(response))
+		// 	}
 
-		}	
+		// }	
 	}
 
 	return nil
