@@ -1,6 +1,10 @@
 package main
 
-import "fmt"
+import (
+	"fmt"
+	"strconv"
+	"time"
+	)
 
 // https://redis.io/docs/latest/develop/reference/protocol-spec/#resp-protocol-description
 
@@ -36,14 +40,35 @@ func echo(args []RespToken) RespToken {
 	return RespToken { kind: "string", value: respEncoded }
 }
 
-var cache = make(map[string]string)
+type Value struct {
+	value string
+	expiry int
+}
+
+var cache = make(map[string]Value)
 
 func set(args []RespToken) RespToken {
-	if len(args) != 2 {
+	if len(args) < 2 {
 		return RespToken{ kind: "string", value: "ERROR" }
 	}
 
-	cache[args[0].bulk] = args[1].bulk
+	var px = 0
+
+	// Store expiry if provided
+	if len(args) > 3 {
+		if args[2].bulk == "px" {
+			px, _ = strconv.Atoi(args[3].bulk)	
+		}
+	}
+
+	key := args[0].bulk
+	value := args[1].bulk
+	cache[key] = Value {value: value, expiry: px}
+	
+	if px > 0 {
+		go expireKey(key, px)
+	}
+	
 	return RespToken { kind: "string", value: "+OK\r\n" }
 }
 
@@ -51,9 +76,21 @@ func get(args []RespToken) RespToken {
 	if len(args) != 1 {
 		return RespToken{ kind: "string", value: "ERROR" }
 	}
-	res := cache[args[0].bulk]
-	respEncoded := fmt.Sprintf("$%d\r\n%s\r\n", len(res), res)
+	res, ok := cache[args[0].bulk] 
+	if ok {
+		value := res.value
+		respEncoded := fmt.Sprintf("$%d\r\n%s\r\n", len(value), value)
+		return RespToken { kind:"string", value: respEncoded }
+	} else {
+		return RespToken{ kind: "string", value: "$-1\r\n"}
+	}
 
-	return RespToken { kind:"string", value: respEncoded }
+}
+
+func expireKey(key string, expireAfter int) {
+	select {
+	case <-time.After(time.Duration(expireAfter) * time.Millisecond):
+		delete(cache, key)
+	}
 }
 
