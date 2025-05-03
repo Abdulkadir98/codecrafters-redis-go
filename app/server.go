@@ -50,7 +50,7 @@ func handleRequest(conn net.Conn) (err error) {
 		lines := strings.Split(rawInput, "\r\n")
 		fmt.Println(lines)
 
-		cmd := lines[2]
+		cmd := strings.ToLower(lines[2])
 		var values []RespToken
 
 		for i := 4; i < len(lines)-1; i+=2 {
