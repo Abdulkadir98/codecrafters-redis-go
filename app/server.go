@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"net"
 	"os"
+
 	// "strconv"
 	"strings"
 )
@@ -11,7 +12,7 @@ import (
 func main() {
 	// You can use print statements as follows for debugging, they'll be visible when running tests.
 	fmt.Println("Logs from your program will appear here!")
-	
+
 	l, err := net.Listen("tcp", "0.0.0.0:6379")
 	if err != nil {
 		fmt.Println("Failed to bind to port 6379")
@@ -20,7 +21,6 @@ func main() {
 
 	defer l.Close()
 	fmt.Println("Server is listening on port 6379")
-	
 
 	for {
 		conn, err := l.Accept()
@@ -34,7 +34,6 @@ func main() {
 
 func handleRequest(conn net.Conn) (err error) {
 	defer conn.Close()
-
 
 	for {
 		buf := make([]byte, 1024)
@@ -53,9 +52,9 @@ func handleRequest(conn net.Conn) (err error) {
 		cmd := strings.ToLower(lines[2])
 		var values []RespToken
 
-		for i := 4; i < len(lines)-1; i+=2 {
+		for i := 4; i < len(lines)-1; i += 2 {
 			// Add all arguments of the redis command
-			values = append(values, RespToken { kind: "string", bulk: lines[i] })
+			values = append(values, RespToken{kind: "string", bulk: lines[i]})
 		}
 
 		if handler, ok := CommandMap[cmd]; ok {
@@ -65,7 +64,6 @@ func handleRequest(conn net.Conn) (err error) {
 				conn.Write([]byte(res.value))
 			}
 		}
-
 
 		// If the input received is an array
 		// if len(lines) > 0 && strings.HasPrefix(lines[0], "*") {
@@ -96,7 +94,7 @@ func handleRequest(conn net.Conn) (err error) {
 		// 		conn.Write([]byte(response))
 		// 	}
 
-		// }	
+		// }
 	}
 
 	return nil
