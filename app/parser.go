@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"flag"
 	"fmt"
 	"os"
 	"strconv"
@@ -9,6 +10,8 @@ import (
 )
 
 // https://redis.io/docs/latest/develop/reference/protocol-spec/#resp-protocol-description
+
+const TOKEN_SEPARATOR = "\r\n"
 
 type RespToken struct {
 	kind  string
@@ -27,7 +30,7 @@ var CommandMap = map[string]func([]RespToken) RespToken{
 
 func ping(args []RespToken) RespToken {
 	if len(args) == 0 {
-		return RespToken{kind: "string", value: "+PONG\r\n"}
+		return RespToken{kind: "string", value: "+PONG" + TOKEN_SEPARATOR}
 	}
 	return RespToken{kind: "string", value: args[0].bulk}
 }
@@ -79,15 +82,38 @@ func get(args []RespToken) RespToken {
 	if len(args) != 1 {
 		return RespToken{kind: "string", value: "ERROR"}
 	}
-	res, ok := cache[args[0].bulk]
-	if ok {
-		value := res.value
-		respEncoded := fmt.Sprintf("$%d\r\n%s\r\n", len(value), value)
-		return RespToken{kind: "string", value: respEncoded}
-	} else {
-		return RespToken{kind: "string", value: "$-1\r\n"}
+
+	dbSectionDataByteStream := getDbSectionFromRDBFile()
+	noValueFound := RespToken{kind: "string", value: "$-1\r\n"}
+	keyToFind := args[0].bulk
+
+	if len(dbSectionDataByteStream) == 0 {
+		res, ok := cache[keyToFind]
+		if ok {
+			value := res.value
+			respEncoded := fmt.Sprintf("$%d\r\n%s\r\n", len(value), value)
+			return RespToken{kind: "string", value: respEncoded}
+		} else {
+			return noValueFound
+		}
 	}
 
+	fmt.Printf("DB Section % x\n", dbSectionDataByteStream)
+
+	// Third byte in the DB section gives the size of the Hash table
+	hashTableSize := dbSectionDataByteStream[2]
+	fmt.Printf("Hash table size: %q\n", hashTableSize)
+
+	// Skip next 2 bytes
+	// The first byte is the size of the expire hash table
+	// The second byte is the value type '00' indicates a string
+
+	_, value := getFirstKeyAndValueFromDbFileByteStream(dbSectionDataByteStream)
+
+	respEncodedValue := fmt.Sprintf("$%d\r\n%s\r\n", len(value), value)
+	respEncoded := RespToken{kind: "string", value: respEncodedValue}
+
+	return respEncoded
 }
 
 func expireKey(key string, expireAfter int) {
@@ -122,38 +148,11 @@ func config(args []RespToken) RespToken {
 }
 
 func keys(args []RespToken) RespToken {
-	// https://rdb.fnordig.de/file_format.html#high-level-algorithm-to-parse-rdb
 	// Get the list of keys from RDB file based on the pattern provided
 	pattern := args[0].bulk
 	fmt.Println("Pattern: ", pattern)
 
-	dir := *DirFlag
-	dbfilename := *DbFileNameFlag
-	filepath := dir + "/" + dbfilename
-
-	file, error := os.Open(filepath)
-
-	if error != nil {
-		// Database is empty
-		return RespToken{kind: "string", value: ""}
-	}
-
-	defer file.Close()
-
-	data := make([]byte, 4096)
-	count, err := file.Read(data)
-
-	if err != nil {
-		fmt.Println(err)
-	}
-
-	fmt.Printf("read %d bytes: %q\n", count, data[:count])
-
-	startOfDbSectionIdx := bytes.Index(data, []byte{byte(0xfe)})
-
-	endOfRdbFileIdx := bytes.Index(data, []byte{byte(0xff)})
-
-	dbSectionDataByteStream := data[startOfDbSectionIdx+1 : endOfRdbFileIdx]
+	dbSectionDataByteStream := getDbSectionFromRDBFile()
 
 	fmt.Printf("DB Section % x\n", dbSectionDataByteStream)
 
@@ -172,19 +171,114 @@ func keys(args []RespToken) RespToken {
 
 	fmt.Printf("The first two bits are: %02b\n", twoMspOfKey)
 
-	if twoMspOfKey == 0x00 {
+	keyValue, _ := getFirstKeyAndValueFromDbFileByteStream(dbSectionDataByteStream)
+
+	respEncoded := fmt.Sprintf("*%d\r\n$%d\r\n%s\r\n", hashTableSize, len(keyValue), keyValue)
+	return RespToken{kind: "string", value: respEncoded}
+}
+
+func getFirstKeyAndValueFromDbFileByteStream(dbSectionByteStream []byte) (string, string) {
+	// Handle key-value pair without expiry
+	// If there is no expiry provided then there is no byte signifying the expiry
+
+	// TODO: Remove Hardcoded location of the starting position of Key
+	stringEncodedKeyByteStart := dbSectionByteStream[5]
+	twoMsbOfKey := (stringEncodedKeyByteStart >> 6) & 0x03 // first two most significant bit, reading left-to-right as it is big endian
+
+	fmt.Printf("The first two bits are: %02b\n", twoMsbOfKey)
+
+	var key = ""
+	var keyLen = 0
+	var value = ""
+
+	if twoMsbOfKey == 0x00 {
 		// Then the remaining 6 bits denote the length of the string
-		keyLen := stringEncodedKeyByteStart & 0x3f // Get the remaining 6 bits of the byte excluding first two bits
+		keyLen = int(stringEncodedKeyByteStart & 0x3f) // Get the remaining 6 bits of the byte excluding first two bits
 		fmt.Printf("Length of key: %d\n", keyLen)
 
 		// The next keyLen bytes will give us the key
 		keyStartIdx := 6
-		keyStringEncodeValue := dbSectionDataByteStream[keyStartIdx : keyStartIdx+int(keyLen)]
+		keyStringEncodeValue := dbSectionByteStream[keyStartIdx : keyStartIdx+keyLen]
 		fmt.Printf("Key: %q", keyStringEncodeValue)
 
-		respEncoded := fmt.Sprintf("*%d\r\n$%d\r\n%s\r\n", hashTableSize, keyLen, keyStringEncodeValue)
-		return RespToken{kind: "string", value: respEncoded}
+		key = string(keyStringEncodeValue)
 	}
 
-	return RespToken{kind: "string", value: ""}
+	valueByteStartIdx := 6 + keyLen
+	stringEncodedValueByteStart := dbSectionByteStream[valueByteStartIdx]
+	twoMsbOfValue := (stringEncodedValueByteStart >> 6) & 0x03 // first two most significant bit, reading left-to-right as it is big endian
+
+	fmt.Printf("The first two bits of string encoded value are: %02b\n", twoMsbOfValue)
+
+	if twoMsbOfValue == 0x00 {
+		// Then the remaining 6 bits denote the length of the string
+		valueLen := stringEncodedValueByteStart & 0x3f // Get the remaining 6 bits of the byte excluding first two bits
+		fmt.Printf("Length of value: %d\n", valueLen)
+
+		// The next valueLen bytes will give us the value
+		valueStartIdx := valueByteStartIdx + 1
+		valueStringEncodeValue := dbSectionByteStream[valueStartIdx : valueStartIdx+int(valueLen)]
+		fmt.Printf("Value: %q", valueStringEncodeValue)
+
+		value = string(valueStringEncodeValue)
+	}
+	//  else if twoMsbOfValue == 0x01 {
+	// 	// Read one additional byte, the combined 14 bits represent the length
+
+	// 	// 6 remaining bits
+	// 	sixRemainingBits := stringEncodedValueByteStart & 0x3f
+	// 	shiftedSixBits := sixRemainingBits << 2
+
+	// 	valueLen := shiftedSixBits | dbSectionDataByteStream[stringEncodedValueByteStart+1]
+	// 	fmt.Printf("Length of value: %d\n", valueLen)
+	// }
+	return key, value
+}
+
+func getDbSectionFromRDBFile() []byte {
+	// https://rdb.fnordig.de/file_format.html#high-level-algorithm-to-parse-rdb
+
+	if isFlagPassed("dir") && isFlagPassed("dbfilename") {
+		dir := *DirFlag
+		dbfilename := *DbFileNameFlag
+
+		filepath := dir + "/" + dbfilename
+		file, error := os.Open(filepath)
+
+		if error != nil {
+			// Database is empty
+			return make([]byte, 0)
+		}
+
+		defer file.Close()
+
+		data := make([]byte, 4096)
+		count, err := file.Read(data)
+
+		if err != nil {
+			fmt.Println(err)
+		}
+
+		fmt.Printf("read %d bytes: %q\n", count, data[:count])
+
+		startOfDbSectionIdx := bytes.Index(data, []byte{byte(0xfe)})
+
+		endOfRdbFileIdx := bytes.Index(data, []byte{byte(0xff)})
+
+		dbSectionDataByteStream := data[startOfDbSectionIdx+1 : endOfRdbFileIdx]
+
+		return dbSectionDataByteStream
+	}
+
+	return make([]byte, 0)
+}
+
+func isFlagPassed(name string) bool {
+	found := false
+	flag.Visit(func(f *flag.Flag) {
+		if f.Name == name {
+			found = true
+		}
+	})
+	return found
 }
