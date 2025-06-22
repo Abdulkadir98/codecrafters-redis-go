@@ -108,7 +108,8 @@ func get(args []RespToken) RespToken {
 	// The first byte is the size of the expire hash table
 	// The second byte is the value type '00' indicates a string
 
-	_, value := getFirstKeyAndValueFromDbFileByteStream(dbSectionDataByteStream)
+	keyValueMap := getAllKeysFromDbFileByteStream()
+	value := keyValueMap[keyToFind]
 
 	respEncodedValue := fmt.Sprintf("$%d\r\n%s\r\n", len(value), value)
 	respEncoded := RespToken{kind: "string", value: respEncodedValue}
@@ -152,11 +153,10 @@ func keys(args []RespToken) RespToken {
 	pattern := args[0].bulk
 	fmt.Println("Pattern: ", pattern)
 
-	keys := getAllKeysFromDbFileByteStream()
-	fmt.Println("Keys: ", keys)
+	keyValueMap := getAllKeysFromDbFileByteStream()
 
-	var respEncoded = fmt.Sprintf("*%d", len(keys))
-	for _, key := range keys {
+	var respEncoded = fmt.Sprintf("*%d", len(keyValueMap))
+	for key, _ := range keyValueMap {
 		respEncoded = respEncoded + TOKEN_SEPARATOR + fmt.Sprintf("$%d", len(key)) + TOKEN_SEPARATOR + key
 	}
 	respEncoded = respEncoded + TOKEN_SEPARATOR
@@ -164,8 +164,8 @@ func keys(args []RespToken) RespToken {
 	return RespToken{kind: "string", value: respEncoded}
 }
 
-func getAllKeysFromDbFileByteStream() []string {
-	var keys = make([]string, 0)
+func getAllKeysFromDbFileByteStream() map[string]string {
+	var keyValueMap = make(map[string]string)
 
 	dbSectionByteStream := getDbSectionFromRDBFile()
 
@@ -184,7 +184,7 @@ func getAllKeysFromDbFileByteStream() []string {
 	var keyStartIdx int
 	var key = ""
 	var keyLen = 0
-	for len(keys) < numOfKeys {
+	for len(keyValueMap) < numOfKeys {
 		if twoMsbOfKey == 0x00 {
 			// Then the remaining 6 bits denote the length of the string
 			keyLen = int(nextStringEncodedKeyByteStart & 0x3f) // Get the remaining 6 bits of the byte excluding first two bits
@@ -196,7 +196,6 @@ func getAllKeysFromDbFileByteStream() []string {
 			fmt.Printf("Key: %q\n", keyStringEncodeValue)
 
 			key = string(keyStringEncodeValue)
-			keys = append(keys, key)
 		}
 
 		valueByteStartIdx := keyStartIdx + keyLen
@@ -214,6 +213,7 @@ func getAllKeysFromDbFileByteStream() []string {
 			valueStartIdx := valueByteStartIdx + 1
 			valueStringEncodeValue := dbSectionByteStream[valueStartIdx : valueStartIdx+valueLen]
 			fmt.Printf("Value: %q\n", valueStringEncodeValue)
+			keyValueMap[key] = string(valueStringEncodeValue)
 
 			// Find next Key position
 			nextStringEncodedKeyByteStartIdx = valueStartIdx + valueLen + 1 // Skipping 1 byte for value type (assumption this is always '00')
@@ -224,70 +224,7 @@ func getAllKeysFromDbFileByteStream() []string {
 		}
 	}
 
-	return keys
-}
-
-func getFirstKeyAndValueFromDbFileByteStream(dbSectionByteStream []byte) (string, string) {
-	// Handle key-value pair without expiry
-	// If there is no expiry provided then there is no byte signifying the expiry
-
-	// Third byte in the DB section gives the size of the Hash table
-	// Skip next 2 bytes
-	// The first byte is the size of the expire hash table
-	// The second byte is the value type '00' indicates a string
-
-	// TODO: Remove Hardcoded location of the starting position of Key
-	stringEncodedKeyByteStart := dbSectionByteStream[5]
-	twoMsbOfKey := (stringEncodedKeyByteStart >> 6) & 0x03 // first two most significant bit, reading left-to-right as it is big endian
-
-	fmt.Printf("The first two bits are: %02b\n", twoMsbOfKey)
-
-	var key = ""
-	var keyLen = 0
-	var value = ""
-
-	if twoMsbOfKey == 0x00 {
-		// Then the remaining 6 bits denote the length of the string
-		keyLen = int(stringEncodedKeyByteStart & 0x3f) // Get the remaining 6 bits of the byte excluding first two bits
-		fmt.Printf("Length of key: %d\n", keyLen)
-
-		// The next keyLen bytes will give us the key
-		keyStartIdx := 6
-		keyStringEncodeValue := dbSectionByteStream[keyStartIdx : keyStartIdx+keyLen]
-		fmt.Printf("Key: %q", keyStringEncodeValue)
-
-		key = string(keyStringEncodeValue)
-	}
-
-	valueByteStartIdx := 6 + keyLen
-	stringEncodedValueByteStart := dbSectionByteStream[valueByteStartIdx]
-	twoMsbOfValue := (stringEncodedValueByteStart >> 6) & 0x03 // first two most significant bit, reading left-to-right as it is big endian
-
-	fmt.Printf("The first two bits of string encoded value are: %02b\n", twoMsbOfValue)
-
-	if twoMsbOfValue == 0x00 {
-		// Then the remaining 6 bits denote the length of the string
-		valueLen := stringEncodedValueByteStart & 0x3f // Get the remaining 6 bits of the byte excluding first two bits
-		fmt.Printf("Length of value: %d\n", valueLen)
-
-		// The next valueLen bytes will give us the value
-		valueStartIdx := valueByteStartIdx + 1
-		valueStringEncodeValue := dbSectionByteStream[valueStartIdx : valueStartIdx+int(valueLen)]
-		fmt.Printf("Value: %q", valueStringEncodeValue)
-
-		value = string(valueStringEncodeValue)
-	}
-	//  else if twoMsbOfValue == 0x01 {
-	// 	// Read one additional byte, the combined 14 bits represent the length
-
-	// 	// 6 remaining bits
-	// 	sixRemainingBits := stringEncodedValueByteStart & 0x3f
-	// 	shiftedSixBits := sixRemainingBits << 2
-
-	// 	valueLen := shiftedSixBits | dbSectionDataByteStream[stringEncodedValueByteStart+1]
-	// 	fmt.Printf("Length of value: %d\n", valueLen)
-	// }
-	return key, value
+	return keyValueMap
 }
 
 func getDbSectionFromRDBFile() []byte {
